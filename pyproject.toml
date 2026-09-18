@@ -1,0 +1,11 @@
+[project]
+name = "sarah3-sunshine-data"
+version = "0.1.0"
+description = "European sunshine-duration data from the SARAH-3 climate data record"
+requires-python = ">=3.12"
+
+dependencies = [
+    "numpy==2.2.1",
+    "rasterio==1.5.0",
+    "Pillow==11.1.0",
+]
