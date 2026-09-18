@@ -2,7 +2,7 @@
 
 <p align="center"><img src="./output/sdu_europe_average_annual.png" alt="Sun with sunglasses" width="60%" ></p>
 
-## Source of data
+## 🛰️ Source of data
 
 The source is **CM SAF SARAH-3** (Surface Solar Radiation Data Set — Heliosat, Edition 3), the **SDU** (Sunshine Duration) product, published by EUMETSAT's Satellite Application Facility on Climate Monitoring (CM SAF), operated by DWD (Deutscher Wetterdienst — the German national meteorological service).
 
@@ -14,21 +14,21 @@ The source is **CM SAF SARAH-3** (Surface Solar Radiation Data Set — Heliosat,
 - **Filenames:** `SDUms<YYYYMMDD><HHMMSS>...nc` (one file per calendar month)
 
 
-## How to obtain the data
+## 📥 How to obtain the data
 
 1. Register a free account at the CM SAF web portal: [wui.cmsaf.eu](https://wui.cmsaf.eu/safira/).
 2. Order the SARAH-3 SDU product for the desired date range and region via the product page (product/experiment IDs, e.g. `fid=36&eid=22199_22482`).
 3. Download the delivered `.nc` files (one per month) from the resulting order folder (e.g. `ORD69093/`).
 4. No paid license or API key is required; CM SAF data is licensed under the **[EUMETSAT CM SAF Products Licence](https://cds.climate.copernicus.eu/licences/eumetsat-cm-saf)** — a distinct, custom EUMETSAT license (not CC-BY): free of charge, no usage restrictions, but requiring the copyright credit "Copyright (c) (year) EUMETSAT" to be displayed wherever the products are used, published, or shown.
 
-## Why this dataset
+## ❓ Why this dataset
 
 - **Satellite-derived, gap-free coverage** — unlike ground station networks, SARAH-3 covers all of Europe, North Africa, and the North Atlantic uniformly, with no station-density bias.
 - **Standardized physical definition** — sunshine duration follows the WMO definition (direct normal irradiance ≥ 120 W/m²), matching the classical [Campbell-Stokes recorder threshold](https://en.wikipedia.org/wiki/Campbell%E2%80%93Stokes_recorder), so results are comparable across the whole domain and to historical ground records.
 - **Monthly sums, multi-year archive** — well suited to building a representative "average annual" climatology by averaging each calendar month across several years before summing to an annual total, rather than relying on a single, possibly anomalous year.
 - **Rich embedded metadata** — CF-compliant global ([Climate and Forecast (CF) Metadata Conventions](https://cfconventions.org/conventions.html)) and variable attributes (creator, [DOI](https://en.wikipedia.org/wiki/Digital_object_identifier), geospatial bounds, `scale_factor`/`add_offset`/units) allow the pipeline to validate the data automatically instead of assuming units, catching packing or scaling errors before they silently corrupt results.
 
-## What was the goal
+## 🎯 What was the goal
 
 Build a small, auditable pipeline that turns raw monthly satellite data files into a web-map-ready sunshine layer:
 
@@ -39,3 +39,26 @@ Build a small, auditable pipeline that turns raw monthly satellite data files in
 4. **PNG preview** — render a Web-Mercator-reprojected PNG strictly from the GeoTIFF + sidecar, ready to be displayed in a web-based interactive map via a simple image overlay (or later, a tiled raster source / direct cloud-optimized GeoTIFF loading). The grey-to-orange color scheme was visually inspired by the [Copernicus Climate Change Service's 2025 State of the Climate: clouds and sunshine report](https://climate.copernicus.eu/esotc/2025/clouds-and-sunshine).
 
 The end goal is two things you can use together: a picture layer you can show on a map, and a data layer you can query directly to get the exact value at any point.
+
+## ⚙️ Pipeline
+
+The script turns monthly sunshine data files into two map-ready outputs:
+
+- A **data layer** that stores yearly sunshine hours and can be queried by longitude and latitude.
+- A **picture layer** that shows the same data as a coloured map image.
+
+### Steps
+
+1. Finds monthly source files within the selected date range.
+2. Checks that every file uses valid and consistent units and value scaling.
+3. Crops the data to the selected geographic area.
+4. Calculates a representative year by averaging each calendar month across all selected years, then adding the twelve monthly averages together.
+5. Saves the result as a georeferenced raster data file.
+6. Creates a small settings file containing the value range, colour scale, image bounds, map projection, and zoom smoothing option.
+7. Creates a PNG preview using those settings.
+
+The source values are stored as compact integer numbers. Before averaging, the script converts them into real sunshine hours using the scale and offset supplied by each source file.
+
+The PNG is prepared for Web Mercator maps. The settings file stores the real geographic image bounds, so a web map can place the image correctly without hardcoded coordinates.
+
+Leap years are included in the input data, but their extra February day has too little effect on the multi-year annual average to require a separate adjustment.
