@@ -1,0 +1,68 @@
+{
+  "source_tif": "sdu_europe_average_annual.tif",
+  "created": "2026-09-18T11:32:59.192936+00:00",
+  "data_range": {
+    "min": 706.0599975585938,
+    "max": 3747.45654296875
+  },
+  "nodata": -9999.0,
+  "image_bounds": {
+    "west": -39.9999990606363,
+    "south": 29.999999295477224,
+    "east": 44.99999894321584,
+    "north": 64.99999847353399
+  },
+  "colormap": {
+    "name": "grey_to_orange_dynamic",
+    "space": "RGB",
+    "stops": [
+      {
+        "fraction": 0.0,
+        "rgb": [
+          60,
+          60,
+          60
+        ]
+      },
+      {
+        "fraction": 0.25,
+        "rgb": [
+          140,
+          140,
+          140
+        ]
+      },
+      {
+        "fraction": 0.5,
+        "rgb": [
+          230,
+          220,
+          190
+        ]
+      },
+      {
+        "fraction": 0.75,
+        "rgb": [
+          255,
+          170,
+          60
+        ]
+      },
+      {
+        "fraction": 1.0,
+        "rgb": [
+          230,
+          81,
+          0
+        ]
+      }
+    ]
+  },
+  "reprojection": {
+    "target_crs": "EPSG:3857",
+    "resampling": "bilinear"
+  },
+  "rendering": {
+    "zoom_resampling": "linear"
+  }
+}

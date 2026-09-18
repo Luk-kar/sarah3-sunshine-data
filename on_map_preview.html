@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sunshine Duration Preview</title>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+  <link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet">
+  <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+  <style>
+    body { margin: 0; padding: 0; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+
+
+    #layer-toggle {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1;
+      background: white;
+      padding: 8px 12px;
+      border-radius: 4px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+      font-family: sans-serif;
+      font-size: 14px;
+    }
+
+
+    #layer-toggle label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+
+  <div id="layer-toggle">
+    <label>
+      <input type="checkbox" id="sunshine-checkbox" checked>
+      Sunshine duration
+    </label>
+  </div>
+
+
+  <script>
+    // Manual nudge offsets (in degrees) applied on top of the sidecar's
+    // image_bounds, in case the image needs fine-tuning against the basemap
+    // without regenerating the PNG/sidecar. Positive NORTH/EAST expand the
+    // image outward on those edges; positive SOUTH/WEST also expand outward
+    // (i.e. they are subtracted from the raw bound), since south/west
+    // coordinates get smaller as they extend further south/west.
+    // const west_east_offset = 4.95;
+    const west_east_offset = 0;
+    const north_south_offset = 0;
+
+
+    const NORTH_OFFSET = -(north_south_offset); // degrees added to the north edge
+    const SOUTH_OFFSET = (north_south_offset); // degrees subtracted from the south edge
+    const EAST_OFFSET = -(west_east_offset);  // degrees added to the east edge
+    const WEST_OFFSET = (west_east_offset);  // degrees subtracted from the west edge
+
+
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: 'https://demotiles.maplibre.org/style.json',
+      center: [2.5, 47.5],
+      zoom: 3,
+    });
+
+
+    // Read the composite GeoTIFF directly in the browser (via geotiff.js),
+    // log its own bounding box/resolution/size, and keep the decoded band
+    // plus its georeferencing around so map clicks can be turned into a
+    // pixel lookup against the real data (not just the colored PNG).
+    let tifData = null; // { values, nodata, west, north, xRes, yRes, width, height }
+
+    async function loadGeoTiffData(url, nodata) {
+      const tiff = await GeoTIFF.fromUrl(url);
+      const image = await tiff.getImage();
+
+      const bbox = image.getBoundingBox(); // [west, south, east, north]
+      const [xRes, yRes] = image.getResolution();
+      const width = image.getWidth();
+      const height = image.getHeight();
+      const origin = image.getOrigin(); // [x, y] of the upper-left pixel corner
+      const rasters = await image.readRasters();
+      const values = rasters[0]; // single-band composite
+
+      console.log('[GeoTIFF]', url);
+      console.log('[GeoTIFF] bounding box (west, south, east, north):', bbox);
+      console.log('[GeoTIFF] origin (upper-left x, y):', origin);
+      console.log('[GeoTIFF] pixel resolution (x, y):', xRes, yRes);
+      console.log('[GeoTIFF] size (width x height):', width, height);
+
+      return {
+        values,
+        nodata,
+        west: origin[0],
+        north: origin[1],
+        xRes,
+        yRes, // negative for a north-up raster
+        width,
+        height,
+      };
+    }
+
+    // Look up the raw GeoTIFF value under a clicked [lng, lat], or null if
+    // outside the raster's extent or at a nodata pixel.
+    function sampleGeoTiffAt(lng, lat) {
+      if (!tifData) return null;
+
+      const col = Math.floor((lng - tifData.west) / tifData.xRes);
+      const row = Math.floor((lat - tifData.north) / tifData.yRes);
+
+      if (col < 0 || col >= tifData.width || row < 0 || row >= tifData.height) {
+        return null;
+      }
+
+      const value = tifData.values[row * tifData.width + col];
+      if (value === tifData.nodata || !Number.isFinite(value)) {
+        return null;
+      }
+
+      return value;
+    }
+
+
+    map.on('load', async () => {
+      // Read the real image bounds and resampling hint from the pipeline's
+      // sidecar instead of hardcoding corner coordinates that could drift
+      // out of sync with the actual GeoTIFF/PNG extent.
+      const sidecar = await fetch('output/sdu_europe_average_annual.colormap.json').then(r => r.json());
+      const { west, south, east, north } = sidecar.image_bounds;
+
+      console.log('[sidecar] image_bounds:', sidecar.image_bounds);
+
+      tifData = await loadGeoTiffData('./output/sdu_europe_average_annual.tif', sidecar.nodata);
+      console.log('[compare] sidecar.image_bounds vs GeoTIFF origin/resolution:', sidecar.image_bounds, tifData);
+
+
+      const adjustedWest = west - WEST_OFFSET;
+      const adjustedSouth = south - SOUTH_OFFSET;
+      const adjustedEast = east + EAST_OFFSET;
+      const adjustedNorth = north + NORTH_OFFSET;
+
+
+      map.addSource('sunshine-annual', {
+        type: 'image',
+        url: 'output/sdu_europe_average_annual.png',
+        coordinates: [
+          [adjustedWest, adjustedNorth],  // top-left
+          [adjustedEast, adjustedNorth],  // top-right
+          [adjustedEast, adjustedSouth],  // bottom-right
+          [adjustedWest, adjustedSouth],  // bottom-left
+        ],
+      });
+
+
+      map.addLayer({
+        id: 'sunshine-annual-layer',
+        type: 'raster',
+        source: 'sunshine-annual',
+        paint: {
+          'raster-opacity': .97,
+          'raster-resampling': sidecar.rendering.zoom_resampling,
+        },
+      });
+
+
+      document.getElementById('sunshine-checkbox').addEventListener('change', (event) => {
+        map.setLayoutProperty(
+          'sunshine-annual-layer',
+          'visibility',
+          event.target.checked ? 'visible' : 'none'
+        );
+      });
+
+
+      // Show a popup with the raw GeoTIFF value under any clicked point.
+      map.on('click', (event) => {
+        const { lng, lat } = event.lngLat;
+        const value = sampleGeoTiffAt(lng, lat);
+
+        const html = value === null
+          ? `<strong>No data</strong><br>${lng.toFixed(3)}, ${lat.toFixed(3)}`
+          : `<strong>${value.toFixed(1)} h/year</strong><br>${lng.toFixed(3)}, ${lat.toFixed(3)}`;
+
+        new maplibregl.Popup()
+          .setLngLat(event.lngLat)
+          .setHTML(html)
+          .addTo(map);
+      });
+    });
+  </script>
+</body>
+</html>
