@@ -48,6 +48,7 @@ from rasterio.crs import CRS
 from rasterio.transform import from_bounds
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 from rasterio.windows import Window, bounds as window_bounds, from_bounds as window_from_bounds
+from rasterio.features import geometry_mask
 
 SOURCE_CRS = CRS.from_epsg(4326)
 WEBMERCATOR_CRS = CRS.from_epsg(3857)
@@ -215,6 +216,82 @@ def validate_consistent_scaling(files: list[Path]) -> ScaleOffset:
           f"units='{reference.unit}' across {len(files)} files")
     return reference
 
+def bounding_boxes_envelope(boxes: list[BoundingBox]) -> BoundingBox:
+    """Return the smallest rectangle containing all requested boxes."""
+
+    if not boxes:
+        raise ValueError("At least one bounding box is required.")
+
+    for index, box in enumerate(boxes):
+        coordinates = (box.west, box.south, box.east, box.north)
+
+        if not all(math.isfinite(value) for value in coordinates):
+            raise ValueError(f"Bounding box {index} has non-finite coordinates.")
+
+        if not (
+            -180 <= box.west < box.east <= 180
+            and -90 <= box.south < box.north <= 90
+        ):
+            raise ValueError(f"Invalid WGS84 bounding box {index}: {box}")
+
+    return BoundingBox(
+        west=min(box.west for box in boxes),
+        south=min(box.south for box in boxes),
+        east=max(box.east for box in boxes),
+        north=max(box.north for box in boxes),
+    )
+
+
+def build_crop_union_mask(
+    sdu_uri: str,
+    window: Window,
+    boxes: list[BoundingBox],
+) -> np.ndarray:
+    """Return True for pixel centers inside at least one requested box."""
+
+    geometries = [
+        {
+            "type": "Polygon",
+            "coordinates": [
+                [
+                    [box.west, box.south],
+                    [box.east, box.south],
+                    [box.east, box.north],
+                    [box.west, box.north],
+                    [box.west, box.south],
+                ]
+            ],
+        }
+        for box in boxes
+    ]
+
+    with rasterio.open(sdu_uri) as src:
+
+        if src.crs is not None and src.crs != SOURCE_CRS:
+            raise ValueError(
+                f"Expected SARAH-3 SDU coordinates in {SOURCE_CRS}, "
+                f"got {src.crs}."
+            )
+
+        if src.crs is None:
+            print(
+                "Note: SDU subdataset has no explicit CRS declaration; "
+                "using the SARAH-3 product's documented WGS84 longitude/latitude grid."
+            )
+
+        if src.transform.is_identity:
+            raise ValueError(
+                "SDU subdataset has an identity transform; cannot reliably "
+                "locate the requested crop on its geographic grid."
+            )
+
+        return geometry_mask(
+            geometries,
+            out_shape=(int(window.height), int(window.width)),
+            transform=rasterio.windows.transform(window, src.transform),
+            invert=True,
+            all_touched=False,
+        )
 
 def compute_crop_window(sdu_uri: str, bbox: BoundingBox) -> Window:
     """
@@ -591,7 +668,7 @@ def render_png_from_sidecar(tif_path: Path, sidecar_path: Path, output_png_path:
 
 def build_composite_with_sidecar_and_preview(
     directory: Path,
-    bbox: BoundingBox,
+    boxes: list[BoundingBox],
     start: YearMonth,
     end: YearMonth,
     tif_output_path: Path,
@@ -602,62 +679,123 @@ def build_composite_with_sidecar_and_preview(
     zoom_resampling: str = "linear",
 ) -> None:
     """
-    End-to-end pipeline: discover files, validate scaling, crop, average,
-    write GeoTIFF composite, write colormap sidecar (including the real
-    image_bounds and the client-side zoom_resampling hint), then render
-    PNG preview.
+    Build the annual composite cropped to the union of requested boxes.
 
-    The crop window is computed once from the first file's own SDU transform
-    and reused for every subsequent file, on the assumption that all monthly
-    files in a run share the same grid (true for a single CM SAF product).
+    Use their envelope for the rectangular output grid, but mark pixels
+    outside the union as nodata before writing and rendering.
     """
     
+    envelope = bounding_boxes_envelope(boxes)
+
     files = discover_monthly_files(directory, start, end)
-    print(f"Using {len(files)} monthly files from {start.year}-{start.month:02d} to {end.year}-{end.month:02d}")
+    print(
+        f"Using {len(files)} monthly files from "
+        f"{start.year}-{start.month:02d} to "
+        f"{end.year}-{end.month:02d}"
+    )
 
     scale_offset = validate_consistent_scaling(files)
 
     first_sdu_uri = resolve_sdu_uri(files[0])
-    window = compute_crop_window(first_sdu_uri, bbox)
+    window = compute_crop_window(first_sdu_uri, envelope)
     edges = window_edges(first_sdu_uri, window)
 
-    if (edges.west, edges.south, edges.east, edges.north) != (bbox.west, bbox.south, bbox.east, bbox.north):
+    if (
+        edges.west,
+        edges.south,
+        edges.east,
+        edges.north,
+    ) != (
+        envelope.west,
+        envelope.south,
+        envelope.east,
+        envelope.north,
+    ):
         print(
-            f"Note: requested bbox ({bbox.west}, {bbox.south}, {bbox.east}, {bbox.north}) was clamped/snapped "
-            f"to the grid's real pixel edges ({edges.west}, {edges.south}, {edges.east}, {edges.north}). "
-            "Downstream consumers (e.g. a web map) must use these real edges, not the requested bbox."
+            f"Note: requested envelope {envelope} was clamped/snapped "
+            f"to the grid's real pixel edges {edges}. "
+            "Downstream consumers must use these real edges."
         )
 
-    annual_grid, valid = compute_average_annual_sdu(files, window, scale_offset)
+    crop_mask = build_crop_union_mask(first_sdu_uri, window, boxes)
+
+    if not crop_mask.any():
+        raise ValueError(
+            "The requested bounding-box union contains no source pixel centers."
+        )
+
+    annual_grid, valid = compute_average_annual_sdu(
+        files, window, scale_offset
+    )
+
+    valid = valid & crop_mask
+
     if not valid.any():
-        raise ValueError("Average annual crop contains no finite, non-nodata SDU values.")
+        raise ValueError(
+            "Average annual crop contains no finite, non-nodata SDU values "
+            "inside the requested bounding-box union."
+        )
 
     data_min, data_max = write_annual_grid_geotiff(
-        annual_grid, valid, edges, files, start, end, scale_offset, tif_output_path
+        annual_grid,
+        valid,
+        edges,
+        files,
+        start,
+        end,
+        scale_offset,
+        tif_output_path,
     )
 
     write_colormap_sidecar(
-        tif_output_path, data_min, data_max, NODATA_VALUE, edges,
-        target_crs, resampling, zoom_resampling, sidecar_output_path,
+        tif_output_path,
+        data_min,
+        data_max,
+        NODATA_VALUE,
+        edges,
+        target_crs,
+        resampling,
+        zoom_resampling,
+        sidecar_output_path,
     )
 
-    render_png_from_sidecar(tif_output_path, sidecar_output_path, png_output_path)
-
+    render_png_from_sidecar(
+        tif_output_path,
+        sidecar_output_path,
+        png_output_path,
+    )
 
 def main() -> None:
     directory = Path("./ORD69093").resolve()
-    bbox = BoundingBox(west=-40.0, south=30.0, east=45.0, north=72.0)
+
+    boxes = [
+        # Original crop, unchanged.
+        BoundingBox(west=-40.0, south=30.0, east=45.0, north=72.0),
+
+        # Additional Canary Islands crop.
+        BoundingBox(west=-19.5, south=26.4, east=-12.0, north=30.0),
+    ]
+
     start = YearMonth(2021, 1)
     end = YearMonth(2026, 1)
 
     tif_output_path = Path("./output/sdu_europe_average_annual.tif")
-    sidecar_output_path = Path("./output/sdu_europe_average_annual.colormap.json")
+    sidecar_output_path = Path(
+        "./output/sdu_europe_average_annual.colormap.json"
+    )
     png_output_path = Path("./output/sdu_europe_average_annual.png")
 
     build_composite_with_sidecar_and_preview(
-        directory, bbox, start, end,
-        tif_output_path, sidecar_output_path, png_output_path,
-        target_crs=WEBMERCATOR_CRS, resampling="bilinear", zoom_resampling="linear",
+        directory=directory,
+        boxes=boxes,
+        start=start,
+        end=end,
+        tif_output_path=tif_output_path,
+        sidecar_output_path=sidecar_output_path,
+        png_output_path=png_output_path,
+        target_crs=WEBMERCATOR_CRS,
+        resampling="bilinear",
+        zoom_resampling="linear",
     )
 
 
